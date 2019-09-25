@@ -4,7 +4,9 @@ from functools import reduce
 
 from PIL import Image
 import numpy as np
+import cv2
 from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
+
 
 def compose(*funcs):
     """Compose arbitrarily many functions, evaluated left to right.
@@ -32,6 +34,55 @@ def letterbox_image(image, size):
 
 def rand(a=0, b=1):
     return np.random.rand()*(b-a) + a
+
+
+def _flip(image, orientation='horizontal'):
+    '''
+    Flip the input image horizontally or vertically.
+    '''
+
+    if orientation == 'horizontal':
+        return cv2.flip(image, 1)
+    else:
+        return cv2.flip(image, 0)
+
+def _brightness(image, min=0.5, max=2.0):
+    '''
+    Randomly change the brightness of the input image.
+
+    Protected against overflow.
+    '''
+
+    hsv = cv2.cvtColor(image,cv2.COLOR_RGB2HSV)
+    random_br = np.random.uniform(min,max)
+
+    #To protect against overflow: Calculate a mask for all pixels
+    #where adjustment of the brightness would exceed the maximum
+    #brightness value and set the value to the maximum at those pixels.
+    mask = hsv[:,:,2] * random_br > 255
+    v_channel = np.where(mask, 255, hsv[:,:,2] * random_br)
+    hsv[:,:,2] = v_channel
+
+    return cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB)
+
+
+def histogram_eq(image):
+    '''
+    Perform histogram equalization on the input image.
+
+    See https://en.wikipedia.org/wiki/Histogram_equalization.
+    '''
+
+    image1 = np.copy(image)
+    # print(image1.shape)
+    # print(image1.dtype)
+    image1 = cv2.cvtColor(image1, cv2.COLOR_RGB2HSV)
+    image1[:,:,2] = cv2.equalizeHist(image1[:,:,2])
+    image1 = cv2.cvtColor(image1, cv2.COLOR_HSV2RGB)
+
+    return image1
+
+
 
 def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jitter=.3, hue=.1, sat=1.5, val=1.5, proc_img=True):
     '''random preprocessing for real-time data augmentation'''
@@ -118,4 +169,71 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
         if len(box)>max_boxes: box = box[:max_boxes]
         box_data[:len(box)] = box
 
+    # print(image_data.shape)
+
     return image_data, box_data
+
+def get_random_data_hd(annotation_line, input_shape, max_boxes=20, equalize=True, brightness=(0.1, 5.0, 0.5), flip=0.5,
+                       fusion=None):
+    '''random preprocessing for real-time data augmentation'''
+    line = annotation_line.split()
+    h, w = input_shape
+    box = np.array([np.array(list(map(float,box.split(',')))) for box in line[1:]])
+    image = None
+
+    if fusion is None:
+        image = cv2.imread(line[0], -1 | 0)
+        # Convert the 1-channel image into a 3-channel image.
+        image = np.stack([image] * 3, axis=-1)
+    elif fusion == 0:
+        image = cv2.imread(line[0], cv2.IMREAD_UNCHANGED)
+
+    # print(image.shape)
+    ih, iw = h, w
+    try:
+        ih, iw = image.shape[:2]
+    except:
+        print(line[0])
+    # resize image
+    scale = min(w / iw, h / ih)
+    nw = int(iw * scale)
+    nh = int(ih * scale)
+    dx = (w - nw) // 2
+    dy = (h - nh) // 2
+
+    image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_CUBIC)
+
+    # print(image.shape)
+    # print(image.dtype)
+
+    # correct boxes
+    box_data = np.zeros((max_boxes, 5))
+    if len(box) > 0:
+        np.random.shuffle(box)
+        if len(box) > max_boxes:
+            box = box[:max_boxes]
+        box[:, [0, 2]] = box[:, [0, 2]] * scale + dx
+        box[:, [1, 3]] = box[:, [1, 3]] * scale + dy
+        box_data[:len(box)] = box
+
+    if equalize:
+        image = histogram_eq(image)
+
+    if brightness:
+        p = np.random.uniform(0, 1)
+        if p >= (1 - brightness[2]):
+            image = _brightness(image, min=brightness[0], max=brightness[1])
+
+    if flip:  # Performs flips along the vertical axis only (i.e. horizontal flips).
+        p = np.random.uniform(0, 1)
+        if p >= (1 - flip):
+            image = _flip(image)
+            if len(box_data) > 0:
+                box_data[:, [0, 2]] = w - box_data[:, [2, 0]]  # xmin and xmax are swapped when mirrored
+
+    # print(image.shape)
+
+    return image, box_data
+
+
+
